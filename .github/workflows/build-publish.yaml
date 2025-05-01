@@ -1,0 +1,298 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Builds, tests and then publishes Helm charts
+name: "Build/Test/Publish Helm Charts ☸️"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  chartmuseum:
+    name: 'ChartMuseum'
+    runs-on: 'ubuntu-24.04'
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - name: 'Start ChartMuseum'
+        # yamllint disable-line rule:line-length
+        uses: modeseven-lfreleng-actions/chartmuseum-action@initial-update # Testing
+        with:
+          password: ${{ secrets.github_token }}
+          exit: false
+
+  build:
+    name: 'Build'
+    runs-on: 'ubuntu-24.04'
+    outputs:
+      artefact_path: "${{ steps.shell.outputs.artefact_path }}"
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - name: 'Checkout: local repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: 'Checkout: ci-management'
+      # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: 'o-ran-sc/ci-management'
+          path: 'ci-management'
+
+      - name: 'Show files'
+        id: list-files
+        shell: bash
+        run: |
+          # Show files
+          ls -al
+
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # 4.3.0
+
+      - name: 'Build pre-requisites'
+        id: pre-requisites
+        shell: bash
+        run: |
+          # Build pre-requisites
+          echo 'Running: git submodule update --init 💬'
+          git submodule update --init
+          echo 'Running: helm plugin installs 💬'
+          plugin_dir='smo-install/onap_oom/kubernetes/helm/plugins/'
+          helm plugin install "$plugin_dir/undeploy/"
+          helm plugin install "$plugin_dir/deploy/"
+          # helm plugin install versio-helm-plugin
+          # Installation of helm-push fixes the error below
+          # Error: unknown command "cm-push" for "helm"
+          helm plugin install https://github.com/chartmuseum/helm-push
+          echo 'Listing Helm plugins 💬'
+          helm plugin list
+
+      - name: 'Run make'
+        uses: modeseven-lfreleng-actions/make-action@update-action # Testing
+        with:
+          repository: 'lfreleng-actions/test-makefile-helm-chart'
+          path: 'charts'
+          make_args: '-C charts'
+
+      - name: 'Configure Git'
+        run: |
+          # Configure Git
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          echo -n "Git username: "; git config user.name
+          echo -n "Git email: "; git config user.email
+
+      - name: 'Test local Helm chart repository'
+        shell: bash
+        # yamllint disable-line rule:line-length
+        run: |
+          # Test local Helm chart repository
+          curl -u "chartmuseum:${{ secrets.github_token }}" http://127.0.0.1:8080/index.yaml
+
+      - name: 'Setup local Helm chart repository'
+        shell: bash
+        run: |
+          # Setup local Helm chart repository
+          echo "Setup chartmuseum Helm chart repository 💬"
+          helm repo add chartmuseum http://127.0.0.1:8080 \
+            --username chartmuseum \
+            --password "${{ secrets.github_token }}" \
+            --insecure-skip-tls-verify
+          helm repo list
+          helm repo update
+          helm search repo chartmuseum
+          # helm repo index chartmuseum
+
+      - name: Verify Helm Configuration
+        run: |
+          # Verify Helm Configuration
+          ls -la /home/runner/.config/helm
+          cat /home/runner/.config/helm/repositories.yaml
+
+      - name: 'Publish Helm Chart'
+        shell: bash
+        run: |
+          # Publish Helm Chart
+          # helm cm-push test-chart/ chartmuseum
+          # See: https://github.com/helm/chart-releaser-action
+          find . -name test-chart-0.1.0.tgz
+          cd charts
+          curl -u "chartmuseum:${{ secrets.github_token }}" --data-binary \
+            "@test-chart-0.1.0.tgz" \
+            http://localhost:8080/api/charts
+          # helm cm-push --insecure charts/test-chart/ chartmuseum
+          echo "Running: helm repo update"
+          helm repo update
+          echo "Running: helm search repo chartmuseum"
+          helm search repo chartmuseum
+
+      - name: 'Run/Install/Test Helm Chart'
+        shell: bash
+        run: |
+          # Run/Install/Test Helm Chart
+          helm list
+          # Use to run K8S: https://github.com/helm/kind-action
+
+      - name: 'Upload Helm Charts as artefacts'
+        shell: bash
+        run: |
+          # Publish Helm Chart artefacts
+
+  test-deploy:
+    name: 'Test K8S Deployment'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - build
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: 'Run K8S Cluster'
+        shell: bash
+        run: |
+          # Run K8S Cluster
+          echo "Deploy a Kubernetes environment here"
+
+      - name: 'Install Helm Chart'
+        shell: bash
+        run: |
+          # Need a Kubernetes cluster to deploy the chart
+          # Deploy the application to the cluster
+          helm install chartmuseum/test-chart --generate-name
+
+  nexus-publish:
+    name: 'Publish [Nexus3]'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - test-deploy
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # See: helm/chart-releaser-action
+      # https://github.com/helm/chart-releaser-action
+
+  github-publish:
+    name: 'Publish [GitHub]'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - test-deploy
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # See: helm/chart-releaser-action
+      # https://github.com/helm/chart-releaser-action
+
+  dockerhub-publish:
+    name: 'Publish [DockerHub]'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - test-deploy
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # See: helm/chart-releaser-action
+      # https://github.com/helm/chart-releaser-action
+
+  aws-publish:
+    name: 'Publish [AWS]'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - test-deploy
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+  azure-publish:
+    name: 'Publish [Azure]'
+    runs-on: 'ubuntu-24.04'
+    needs:
+      - test-deploy
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # See: helm/chart-releaser-action
+      # https://github.com/helm/chart-releaser-action
+
+      # yamllint disable-line rule:line-length
+      - uses: Azure/docker-login@15c4aadf093404726ab2ff205b2cdd33fa6d054c # v2
+        with:
+          login-server: contoso.azurecr.io
+          username: ${{ secrets.AZURE_USERNAME }}
+          password: ${{ secrets.AZURE_PASSWORD }}
+
+      - name: Push image
+        run: |
+          docker build . -t contoso.azurecr.io/k8sdemo:${{ github.sha }}
+          docker push contoso.azurecr.io/k8sdemo:${{ github.sha }}
